@@ -22,7 +22,7 @@ use crate::audio::{
     READ_AHEAD_DURING_PLAYBACK_ROUNDTRIPS, READ_AHEAD_DURING_PLAYBACK_SECONDS,
 };
 use crate::audio_backend::Sink;
-use crate::metadata::{AudioItem, FileFormat};
+use crate::metadata::{AudioItem, FileFormat, Metadata, Track, Album, Artist};
 use crate::mixer::AudioFilter;
 
 pub struct Player {
@@ -54,11 +54,17 @@ enum PlayerCommand {
 pub enum PlayerEvent {
     Started {
         track_id: SpotifyId,
+        track_meta: Track,
+        album_meta: Album,
+        artist_meta: Artist,
     },
 
     Changed {
         old_track_id: SpotifyId,
         new_track_id: SpotifyId,
+        track_meta: Track,
+        album_meta: Album,
+        artist_meta: Artist,
     },
 
     Stopped {
@@ -211,6 +217,9 @@ enum PlayerState {
         normalisation_factor: f32,
         stream_loader_controller: StreamLoaderController,
         bytes_per_second: usize,
+        track_meta: Track,
+        album_meta: Album,
+        artist_meta: Artist,
     },
     Playing {
         track_id: SpotifyId,
@@ -219,6 +228,9 @@ enum PlayerState {
         normalisation_factor: f32,
         stream_loader_controller: StreamLoaderController,
         bytes_per_second: usize,
+        track_meta: Track,
+        album_meta: Album,
+        artist_meta: Artist,
     },
     EndOfTrack {
         track_id: SpotifyId,
@@ -291,6 +303,9 @@ impl PlayerState {
                 normalisation_factor,
                 stream_loader_controller,
                 bytes_per_second,
+                track_meta,
+                album_meta,
+                artist_meta,
             } => {
                 *self = Playing {
                     track_id: track_id,
@@ -299,6 +314,9 @@ impl PlayerState {
                     normalisation_factor: normalisation_factor,
                     stream_loader_controller: stream_loader_controller,
                     bytes_per_second: bytes_per_second,
+                    track_meta: track_meta,
+                    album_meta: album_meta,
+                    artist_meta: artist_meta,
                 };
             }
             _ => panic!("invalid state"),
@@ -315,6 +333,9 @@ impl PlayerState {
                 normalisation_factor,
                 stream_loader_controller,
                 bytes_per_second,
+                track_meta,
+                album_meta,
+                artist_meta,
             } => {
                 *self = Paused {
                     track_id: track_id,
@@ -323,9 +344,39 @@ impl PlayerState {
                     normalisation_factor: normalisation_factor,
                     stream_loader_controller: stream_loader_controller,
                     bytes_per_second: bytes_per_second,
+                    track_meta: track_meta,
+                    album_meta: album_meta,
+                    artist_meta: artist_meta,
                 };
             }
             _ => panic!("invalid state"),
+        }
+    }
+
+    fn track_meta(&mut self) -> Option<&mut Track> {
+        use self::PlayerState::*;
+        match *self {
+            Stopped | EndOfTrack { .. } => None,
+            Paused { ref mut track_meta, .. } | Playing { ref mut track_meta, .. } => Some(track_meta),
+            Invalid => panic!("invalid state"),
+        }
+    }
+
+    fn album_meta(&mut self) -> Option<&mut Album> {
+        use self::PlayerState::*;
+        match *self {
+            Stopped | EndOfTrack { .. } => None,
+            Paused { ref mut album_meta, .. } | Playing { ref mut album_meta, .. } => Some(album_meta),
+            Invalid => panic!("invalid state"),
+        }
+    }
+
+    fn artist_meta(&mut self) -> Option<&mut Artist> {
+        use self::PlayerState::*;
+        match *self {
+            Stopped | EndOfTrack { .. } => None,
+            Paused { ref mut artist_meta, .. } | Playing { ref mut artist_meta, .. } => Some(artist_meta),
+            Invalid => panic!("invalid state"),
         }
     }
 }
@@ -448,6 +499,9 @@ impl PlayerInternal {
                         normalisation_factor,
                         stream_loader_controller,
                         bytes_per_second,
+                        track_meta,
+                        album_meta,
+                        artist_meta,
                     )) => {
                         if play {
                             match self.state {
@@ -461,8 +515,16 @@ impl PlayerInternal {
                                 } => self.send_event(PlayerEvent::Changed {
                                     old_track_id: old_track_id,
                                     new_track_id: track_id,
+                                    track_meta: track_meta.clone(),
+                                    album_meta: album_meta.clone(),
+                                    artist_meta: artist_meta.clone(),
                                 }),
-                                _ => self.send_event(PlayerEvent::Started { track_id }),
+                                _ => self.send_event(PlayerEvent::Started {
+                                    track_id: track_id,
+                                    track_meta: track_meta.clone(),
+                                    album_meta: album_meta.clone(),
+                                    artist_meta: artist_meta.clone(),
+                                }),
                             }
 
                             self.start_sink();
@@ -474,6 +536,9 @@ impl PlayerInternal {
                                 normalisation_factor: normalisation_factor,
                                 stream_loader_controller: stream_loader_controller,
                                 bytes_per_second: bytes_per_second,
+                                track_meta: track_meta.clone(),
+                                album_meta: album_meta.clone(),
+                                artist_meta: artist_meta.clone(),
                             };
                         } else {
                             self.state = PlayerState::Paused {
@@ -483,6 +548,9 @@ impl PlayerInternal {
                                 normalisation_factor: normalisation_factor,
                                 stream_loader_controller: stream_loader_controller,
                                 bytes_per_second: bytes_per_second,
+                                track_meta: track_meta.clone(),
+                                album_meta: album_meta.clone(),
+                                artist_meta: artist_meta.clone(),
                             };
                             match self.state {
                                 PlayerState::Playing {
@@ -495,6 +563,9 @@ impl PlayerInternal {
                                 } => self.send_event(PlayerEvent::Changed {
                                     old_track_id: old_track_id,
                                     new_track_id: track_id,
+                                    track_meta: track_meta.clone(),
+                                    album_meta: album_meta.clone(),
+                                    artist_meta: artist_meta.clone(),
                                 }),
                                 _ => (),
                             }
@@ -555,7 +626,22 @@ impl PlayerInternal {
                 if let PlayerState::Paused { track_id, .. } = self.state {
                     self.state.paused_to_playing();
 
-                    self.send_event(PlayerEvent::Started { track_id });
+                    let track_meta = self.state.track_meta().unwrap().clone();
+                    let album_meta = self.state.album_meta().unwrap().clone();
+                    let artist_meta = self.state.artist_meta().unwrap().clone();
+
+                    info!("Played:");
+                    info!("Track \"{}\"", track_meta.name);
+                    info!("Artist \"{}\"", artist_meta.name);
+                    info!("Album \"{}\"", album_meta.name);
+                    info!("Album \"{}\"", album_meta.covers[0]);
+
+                    self.send_event(PlayerEvent::Started {
+                        track_id: track_id,
+                        track_meta: track_meta,
+                        album_meta: album_meta,
+                        artist_meta: artist_meta,
+                    });
                     self.start_sink();
                 } else {
                     warn!("Player::play called from invalid state");
@@ -635,7 +721,10 @@ impl PlayerInternal {
         &self,
         spotify_id: SpotifyId,
         position: i64,
-    ) -> Option<(Decoder, f32, StreamLoaderController, usize)> {
+    ) -> Option<(Decoder, f32, StreamLoaderController, usize, Track, Album, Artist)> {
+        let track_meta = Track::get(&self.session, spotify_id).wait().unwrap();
+        let album_meta = Album::get(&self.session, track_meta.album).wait().unwrap();
+        let artist_meta = Artist::get(&self.session, track_meta.artists[0]).wait().unwrap();
         let audio = match AudioItem::get_audio_item(&self.session, spotify_id).wait() {
             Ok(audio) => audio,
             Err(_) => {
@@ -750,6 +839,9 @@ impl PlayerInternal {
             normalisation_factor,
             stream_loader_controller,
             bytes_per_second,
+            track_meta,
+            album_meta,
+            artist_meta,
         ))
     }
 }
